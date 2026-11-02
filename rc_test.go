@@ -111,37 +111,74 @@ func TestProfileDoesNotCheckVersionQueries(t *testing.T) {
 	}
 }
 
-func TestBindingsPassesEveryArgumentToTheBindingsTool(t *testing.T) {
-	t.Setenv("PATH", fakeProfiler(t, "rc-bindings"))
-	out, _, err := rc("bindings", "check", "--target", "common-integrations:go", "--help")
-	if err != nil || out != "args: check --target common-integrations:go --help\n" {
-		t.Fatalf("%v\n%q", err, out)
-	}
+func TestBindingsRunsInProcessWithAndWithoutALeadingBindings(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
-	t.Setenv("RC_BINDINGS_BIN", filepath.Join(fakeProfiler(t, "tool"), "tool"))
-	if out, _, err = rc("bindings", "update"); err != nil || out != "args: update\n" {
-		t.Fatalf("%v\n%q", err, out)
+	for _, args := range [][]string{{"bindings", "resolve", "--help"}, {"bindings", "bindings", "resolve", "--help"}} {
+		if _, errout, err := rc(args...); err != nil || !strings.Contains(errout, "-packages") {
+			t.Fatalf("%v: %v\n%s", args, err, errout)
+		}
+	}
+	if _, _, err := rc("bindings", "nope"); err == nil || !strings.Contains(err.Error(), `unknown bindings command "nope"`) {
+		t.Fatalf("unknown command accepted: %v", err)
 	}
 }
 
-func TestBindingsExplainsAMissingTool(t *testing.T) {
+func goProject(t *testing.T) string {
+	dir := t.TempDir()
+	for name, body := range map[string]string{"go.mod": "module example.com/app\n\ngo 1.25\n", "main.go": "package main\n\nfunc main() {}\n"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
+}
+
+func TestGoProfilerRunsInProcessAndKeepsItsOwnExitStatus(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
-	if _, _, err := rc("bindings", "check"); err == nil || !strings.Contains(err.Error(), "RC_BINDINGS_BIN") {
-		t.Fatalf("missing tool not explained: %v", err)
+	var exit *ExitError
+	out, _, err := rc("profile", "go", "--version", "--json")
+	if err != nil || !strings.Contains(out, `"name":"go-rc-profiler"`) || !strings.Contains(out, `"`+CoreSchema+`"`) {
+		t.Fatalf("%v\n%q", err, out)
+	}
+	if _, errout, err := rc("profile", "go", "bogus"); !errors.As(err, &exit) || exit.Code != 1 || !strings.Contains(errout, `unknown command "bogus"`) {
+		t.Fatalf("%v %q", err, errout)
+	}
+	if _, _, err := rc("profile", "go", "generate", "-nope"); !errors.As(err, &exit) || exit.Code != 2 {
+		t.Fatalf("%v", err)
+	}
+}
+
+func TestGoProfilerErrorsReachTheUserUnchangedWhenGoIsMissing(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	var exit *ExitError
+	out, errout, err := rc("profile", "go", "generate", "--dir", goProject(t))
+	if !errors.As(err, &exit) || exit.Code != 1 || out != "" || !strings.Contains(errout, "go command required, not found") || strings.Contains(errout, "rc ") {
+		t.Fatalf("%v %q %q", err, out, errout)
+	}
+}
+
+func TestGoProfilerOverrideRunsAnExternalBinary(t *testing.T) {
+	dir := fakeProfiler(t, "external")
+	t.Setenv("PATH", t.TempDir())
+	t.Setenv("RC_GO_PROFILER_BIN", filepath.Join(dir, "external"))
+	if out, _, err := rc("profile", "go", "generate"); err != nil || out != "args: generate\n" {
+		t.Fatalf("%v\n%q", err, out)
+	}
+	t.Setenv("RC_GO_PROFILER_BIN", filepath.Join(dir, "absent"))
+	if _, _, err := rc("profile", "go", "generate"); err == nil || !strings.Contains(err.Error(), "RC_GO_PROFILER_BIN") {
+		t.Fatalf("missing override not explained: %v", err)
 	}
 }
 
 func TestDoctorListsToolsAndFlagsIncompatibleProfilers(t *testing.T) {
 	dir := fakeProfiler(t, "rc-profiler-typescript")
-	for _, name := range []string{"rc-profiler-ruby", "rc-bindings"} {
-		if err := os.Symlink(filepath.Join(dir, "rc-profiler-typescript"), filepath.Join(dir, name)); err != nil {
-			t.Fatal(err)
-		}
+	if err := os.Symlink(filepath.Join(dir, "rc-profiler-typescript"), filepath.Join(dir, "rc-profiler-ruby")); err != nil {
+		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir)
 	t.Setenv("FAKE_SCHEMAS", `["`+CoreSchema+`"]`)
 	out, _, err := rc("doctor")
-	for _, want := range []string{"rc-bindings", "go  ", "not found", "typescript", "1.0.0  compatible", "ruby"} {
+	for _, want := range []string{"bindings    built in", "go          built in", "python      not found", "typescript", "1.0.0  compatible", "ruby"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("doctor output lacks %q:\n%s", want, out)
 		}

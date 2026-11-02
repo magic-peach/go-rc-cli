@@ -1,7 +1,11 @@
 package rc
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -9,6 +13,8 @@ import (
 	"strings"
 	"text/tabwriter"
 
+	"github.com/runtimeconditions/extensions/tooling/extension-bindings/orchestrator"
+	goprofiler "github.com/runtimeconditions/go-rc-profiler/cli"
 	"github.com/spf13/cobra"
 )
 
@@ -20,19 +26,21 @@ func doctorCommand() *cobra.Command {
 		RunE: func(c *cobra.Command, _ []string) error {
 			out := tabwriter.NewWriter(c.OutOrStdout(), 0, 4, 2, ' ', 0)
 			fmt.Fprintf(out, "rc\t%s\ttargets core schema %s\n", c.Root().Version, CoreSchema)
-			bindings := "not found"
-			if path, err := findExecutable("RC_BINDINGS_BIN", "rc-bindings"); err == nil {
-				bindings = path
-			}
-			fmt.Fprintf(out, "bindings\t%s\n", bindings)
+			fmt.Fprintln(out, "bindings\tbuilt in")
 			incompatible := 0
 			for _, language := range doctorLanguages() {
+				var info profilerInfo
+				var ok bool
 				path, err := profilerPath(language)
-				if err != nil {
+				switch {
+				case language == "go" && os.Getenv(profilerEnv(language)) == "":
+					path, info, ok = "built in", builtinGoInfo(), true
+				case err != nil:
 					fmt.Fprintf(out, "%s\tnot found\n", language)
 					continue
+				default:
+					info, ok = queryInfo(c.Context(), path)
 				}
-				info, ok := queryInfo(c.Context(), path)
 				status := "compatible"
 				switch {
 				case !ok:
@@ -73,4 +81,15 @@ func versionLine(path string) string {
 		return line
 	}
 	return "unknown"
+}
+
+func builtinGoInfo() (info profilerInfo) {
+	var out bytes.Buffer
+	if goprofiler.Run(context.Background(), []string{"--version", "--json"}, &out, io.Discard) == nil {
+		_ = json.Unmarshal(out.Bytes(), &info)
+	}
+	if identity, err := orchestrator.ModuleIdentity(goProfilerModule, ""); err == nil {
+		info.Version = identity.Version
+	}
+	return info
 }

@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"regexp"
 	"slices"
 	"strings"
 	"time"
 
+	goprofiler "github.com/runtimeconditions/go-rc-profiler/cli"
 	"github.com/spf13/cobra"
 )
 
@@ -19,7 +21,7 @@ const CoreSchema = "0.4.0"
 
 var languageName = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
 
-var publishedProfilers = map[string]string{"go": "go-rc-profiler", "python": "runtimeconditions-python-profiler", "typescript": "runtimeconditions-typescript-profiler"}
+var publishedProfilers = map[string]string{"python": "runtimeconditions-python-profiler", "typescript": "runtimeconditions-typescript-profiler"}
 
 func profileCommand() *cobra.Command {
 	return &cobra.Command{
@@ -27,12 +29,16 @@ func profileCommand() *cobra.Command {
 		Short: "Profile an application with an installed language profiler",
 		Long: `Runs the profiler for <language> and passes the remaining arguments to it unchanged.
 
-The profiler is the executable named by RC_<LANGUAGE>_PROFILER_BIN, else rc-profiler-<language> on PATH.
-The go, python and typescript profilers are also found under their own published executable names.`,
+The Go profiler is built into rc; RC_GO_PROFILER_BIN runs an external one instead. Any other profiler is
+the executable named by RC_<LANGUAGE>_PROFILER_BIN, else rc-profiler-<language> on PATH. The python and
+typescript profilers are also found under their own published executable names.`,
 		DisableFlagParsing: true,
 		RunE: func(c *cobra.Command, args []string) error {
 			if len(args) == 0 || args[0] == "-h" || args[0] == "--help" {
 				return c.Help()
+			}
+			if args[0] == "go" && os.Getenv(profilerEnv("go")) == "" {
+				return runBuiltinGoProfiler(c, args[1:])
 			}
 			path, err := profilerPath(args[0])
 			if err != nil {
@@ -46,6 +52,13 @@ The go, python and typescript profilers are also found under their own published
 			return runPlugin(c, path, args[1:])
 		},
 	}
+}
+
+func runBuiltinGoProfiler(c *cobra.Command, args []string) error {
+	if code := goprofiler.Exit(c.ErrOrStderr(), goprofiler.Run(c.Context(), args, c.OutOrStdout(), c.ErrOrStderr())); code != 0 {
+		return &ExitError{code}
+	}
+	return nil
 }
 
 func profilerPath(language string) (string, error) {
